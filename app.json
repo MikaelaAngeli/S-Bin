@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "SmartBin",
+    "slug": "SmartBin",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/smartbin-app-icon.png",
+    "scheme": "smartbin",
+    "userInterfaceStyle": "automatic",
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0A8052",
+        "foregroundImage": "./assets/images/smartbin-app-icon.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.miakelaangeli.SmartBin"
+    },
+    "web": {
+      "output": "server",
+      "favicon": "./assets/images/smartbin-app-icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#208AEF",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "d9f352a7-84fe-4617-a4b4-013ae9d5cab4"
+      }
+    }
+  }
+}

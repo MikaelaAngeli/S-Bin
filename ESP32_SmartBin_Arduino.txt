@@ -1,0 +1,396 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+
+// ================== EDIT THESE VALUES ==================
+const char* WIFI_SSID     = "Yu Sanchez Family";
+const char* WIFI_PASSWORD = "Yusanchez06141816052215";
+
+// Database host only: no https:// and no trailing slash.
+const char* DB_HOST = "sbin-tester001-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+// Firebase Project settings -> General -> Web API Key
+const char* API_KEY = "AIzaSyAoAwlpTtud3mv3cvKVn_UuHHFGQWXLaIg";
+// =======================================================
+
+// ---------- Pins ----------
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+
+#define GREEN_LED 19
+#define YELLOW_LED 21
+#define RED_LED 22
+#define BUZZER 23
+
+// ---------- Distance thresholds in centimeters ----------
+#define GREEN_THRESHOLD 20
+#define YELLOW_THRESHOLD 10
+
+// Calibration:
+// EMPTY_DISTANCE_CM = sensor to bottom of the EMPTY bin
+// FULL_DISTANCE_CM  = sensor to trash when the bin counts as 100% full
+const float EMPTY_DISTANCE_CM = 40.0;
+const float FULL_DISTANCE_CM  = 10.0;
+
+#define ADDITION_THRESHOLD 2.5
+
+#define GREEN 0
+#define YELLOW 1
+#define RED 2
+
+// ---------- Timing ----------
+const unsigned long UPLOAD_INTERVAL_MS = 5000;
+const unsigned long WIFI_RETRY_MS      = 10000;
+const unsigned long TOKEN_REFRESH_MS   = 50UL * 60UL * 1000UL;
+
+int currentState = -1;
+float lastStableDistance = -1;
+int additionCount = 0;
+
+String idToken = "";
+String refreshToken = "";
+unsigned long lastUpload = 0;
+unsigned long lastWifiTry = 0;
+unsigned long lastTokenTime = 0;
+
+// ---------- Setup ----------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(BUZZER, OUTPUT);
+
+  digitalWrite(TRIG_PIN, LOW);
+  digitalWrite(BUZZER, LOW);
+
+  connectWiFi();
+  delay(500);
+}
+
+// ---------- Main loop ----------
+void loop() {
+  keepWiFiAlive();
+
+  float distance = getDistance();
+
+  if (distance < 0) {
+    Serial.println("No valid reading");
+    delay(300);
+    return;
+  }
+
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+
+  int newState;
+  if (distance > GREEN_THRESHOLD) {
+    newState = GREEN;
+  } else if (distance > YELLOW_THRESHOLD) {
+    newState = YELLOW;
+  } else {
+    newState = RED;
+  }
+  currentState = newState;
+  updateLEDs(currentState);
+
+  if (millis() - lastUpload >= UPLOAD_INTERVAL_MS) {
+    lastUpload = millis();
+    uploadToFirebase(distance, currentState);
+  }
+
+  if (lastStableDistance < 0) {
+    lastStableDistance = distance;
+    delay(300);
+    return;
+  }
+
+  if (distance <= lastStableDistance - ADDITION_THRESHOLD) {
+    additionCount++;
+  } else {
+    additionCount = 0;
+    if (distance > lastStableDistance) {
+      lastStableDistance = distance;
+    }
+  }
+
+  if (additionCount >= 3) {
+    Serial.println("NEW TRASH DETECTED!");
+    lastStableDistance = distance;
+    additionCount = 0;
+
+    if (currentState == YELLOW) {
+      Serial.println("BIN GETTING FULL!");
+      beep(2);
+    } else if (currentState == RED) {
+      Serial.println("BIN IS FULL!");
+      beep(3);
+    } else {
+      Serial.println("BIN HAS SPACE!");
+    }
+  }
+
+  delay(300);
+}
+
+// ---------- Wi-Fi ----------
+void connectWiFi() {
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(WIFI_SSID);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("Wi-Fi connected. IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("Wi-Fi FAILED. Will keep retrying in the background.");
+  }
+}
+
+void keepWiFiAlive() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  if (millis() - lastWifiTry < WIFI_RETRY_MS) return;
+
+  lastWifiTry = millis();
+  Serial.println("Wi-Fi lost. Reconnecting...");
+  WiFi.disconnect();
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+}
+
+// ---------- Firebase anonymous authentication ----------
+String extractJsonString(const String& body, const char* field) {
+  String key = String("\"") + field + "\"";
+  int keyPosition = body.indexOf(key);
+  if (keyPosition < 0) return "";
+
+  int colon = body.indexOf(':', keyPosition + key.length());
+  if (colon < 0) return "";
+
+  int quoteStart = body.indexOf('"', colon + 1);
+  if (quoteStart < 0) return "";
+
+  int quoteEnd = body.indexOf('"', quoteStart + 1);
+  if (quoteEnd < 0) return "";
+
+  return body.substring(quoteStart + 1, quoteEnd);
+}
+
+String urlEncode(const String& value) {
+  const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  encoded.reserve(value.length() * 3);
+
+  for (unsigned int i = 0; i < value.length(); i++) {
+    unsigned char c = value[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' ||
+        c == '.' || c == '~') {
+      encoded += (char)c;
+    } else {
+      encoded += '%';
+      encoded += hex[c >> 4];
+      encoded += hex[c & 0x0F];
+    }
+  }
+  return encoded;
+}
+
+bool signInAnonymously() {
+  WiFiClientSecure client;
+  client.setInsecure();  // Prototype only; production firmware should validate the server certificate.
+
+  HTTPClient http;
+  String url = String("https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=") + API_KEY;
+
+  if (!http.begin(client, url)) {
+    Serial.println("Auth: could not start HTTP");
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.POST("{\"returnSecureToken\":true}");
+  String reply = http.getString();
+  http.end();
+
+  if (code != 200) {
+    Serial.print("Anonymous sign-in FAILED. HTTP ");
+    Serial.println(code);
+    Serial.println(reply);
+    return false;
+  }
+
+  idToken = extractJsonString(reply, "idToken");
+  refreshToken = extractJsonString(reply, "refreshToken");
+  if (idToken.length() == 0 || refreshToken.length() == 0) {
+    Serial.println("Auth: token missing from Firebase reply");
+    idToken = "";
+    refreshToken = "";
+    return false;
+  }
+
+  lastTokenTime = millis();
+  Serial.println("Anonymous sign-in OK");
+  return true;
+}
+
+bool refreshIdToken() {
+  WiFiClientSecure client;
+  client.setInsecure();  // Prototype only; production firmware should validate the server certificate.
+
+  HTTPClient http;
+  String url = String("https://securetoken.googleapis.com/v1/token?key=") + API_KEY;
+
+  if (!http.begin(client, url)) {
+    Serial.println("Token refresh: could not start HTTP");
+    return false;
+  }
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+  String body = String("grant_type=refresh_token&refresh_token=") + urlEncode(refreshToken);
+  int code = http.POST(body);
+  String reply = http.getString();
+  http.end();
+
+  if (code != 200) {
+    Serial.print("Token refresh FAILED. HTTP ");
+    Serial.println(code);
+    Serial.println(reply);
+    if (code == 400) {
+      idToken = "";
+      refreshToken = "";
+    }
+    return false;
+  }
+
+  idToken = extractJsonString(reply, "id_token");
+  String newRefreshToken = extractJsonString(reply, "refresh_token");
+  if (idToken.length() == 0) {
+    Serial.println("Token refresh: token missing from Firebase reply");
+    return false;
+  }
+  if (newRefreshToken.length() > 0) {
+    refreshToken = newRefreshToken;
+  }
+
+  lastTokenTime = millis();
+  Serial.println("Firebase token refreshed");
+  return true;
+}
+
+bool ensureFirebaseAuth() {
+  if (idToken.length() > 0 && millis() - lastTokenTime < TOKEN_REFRESH_MS) {
+    return true;
+  }
+
+  if (refreshToken.length() > 0) {
+    if (refreshIdToken()) return true;
+    if (refreshToken.length() > 0) return false;
+  }
+
+  return signInAnonymously();
+}
+
+// ---------- Firebase Realtime Database ----------
+bool uploadToFirebase(float distance, int state) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Upload skipped: no Wi-Fi");
+    return false;
+  }
+
+  if (!ensureFirebaseAuth()) return false;
+
+  int fillPercent = calcFillPercent(distance);
+  const char* stateText = (state == GREEN) ? "green" : (state == YELLOW) ? "yellow" : "red";
+
+  String json = String("{\"fillLevel\":") + fillPercent +
+                ",\"distanceCm\":" + String(distance, 1) +
+                ",\"binState\":\"" + stateText + "\"" +
+                ",\"esp32Online\":true" +
+                ",\"lastSeen\":{\".sv\":\"timestamp\"}}";
+
+String url = String("https://") + DB_HOST + "/smartbin.json?auth=" + urlEncode(idToken);
+  WiFiClientSecure client;
+  client.setInsecure();  // Prototype only; production firmware should validate the server certificate.
+
+  HTTPClient http;
+  if (!http.begin(client, url)) {
+    Serial.println("Upload: could not start HTTP");
+    return false;
+  }
+  http.addHeader("Content-Type", "application/json");
+
+  int code = http.sendRequest("PATCH", json);
+  String reply = http.getString();
+  http.end();
+
+  if (code == 200) {
+    Serial.print("Firebase OK -> fillLevel=");
+    Serial.print(fillPercent);
+    Serial.print("% state=");
+    Serial.println(stateText);
+    return true;
+  }
+
+  Serial.print("Firebase ERROR. HTTP ");
+  Serial.println(code);
+  Serial.println(reply);
+  if (code == 401) {
+    idToken = "";
+    lastTokenTime = 0;
+  }
+  return false;
+}
+
+int calcFillPercent(float distance) {
+  float pct = (EMPTY_DISTANCE_CM - distance) / (EMPTY_DISTANCE_CM - FULL_DISTANCE_CM) * 100.0;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  return (int)(pct + 0.5);
+}
+
+// ---------- Sensor, LEDs, and buzzer ----------
+float getDistance() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  if (duration == 0) return -1;
+
+  float distance = duration * 0.0343 / 2;
+  if (distance < 2 || distance > 400) return -1;
+
+  return distance;
+}
+
+void updateLEDs(int state) {
+  digitalWrite(GREEN_LED, state == GREEN ? HIGH : LOW);
+  digitalWrite(YELLOW_LED, state == YELLOW ? HIGH : LOW);
+  digitalWrite(RED_LED, state == RED ? HIGH : LOW);
+}
+
+void beep(int times) {
+  for (int i = 0; i < times; i++) {
+    tone(BUZZER, 2000);
+    delay(400);
+    noTone(BUZZER);
+    delay(250);
+  }
+}

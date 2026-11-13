@@ -1,0 +1,18 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    "smartbin": {
+      ".write": "auth != null"
+    },
+    "devices": {
+      "smartbin-01": {
+        "commands": {
+          "lid": {
+            ".write": "auth != null",
+            ".validate": "newData.hasChildren(['action', 'commandId', 'requestedAt']) && (newData.child('action').val() == 'open' || newData.child('action').val() == 'closed') && newData.child('commandId').isString() && newData.child('requestedAt').isNumber()"
+          }
+        }
+      }
+    }
+  }
+}

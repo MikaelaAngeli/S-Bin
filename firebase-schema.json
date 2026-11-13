@@ -1,0 +1,44 @@
+{
+  "devices": {
+    "smartbin-01": {
+      "fillPercent": 65,
+      "distanceCm": 12.4,
+      "lidStatus": "closed",
+      "online": true,
+      "updatedAt": 1793210000000,
+      "commandAck": {
+        "commandId": "example-command-001",
+        "action": "closed",
+        "status": "success",
+        "lidStatus": "closed",
+        "message": "Example acknowledgement"
+      }
+    }
+  },
+  "history": {
+    "smartbin-01": {
+      "reading-001": {
+        "fillPercent": 52,
+        "timestamp": 1793206400000
+      },
+      "reading-002": {
+        "fillPercent": 58,
+        "timestamp": 1793208200000
+      },
+      "reading-003": {
+        "fillPercent": 65,
+        "timestamp": 1793210000000
+      }
+    }
+  },
+  "notifications": {
+    "smartbin-01": {
+      "alert-001": {
+        "title": "SmartBin is online",
+        "message": "The ESP32 has connected to the database.",
+        "type": "info",
+        "timestamp": 1793210000000
+      }
+    }
+  }
+}
